@@ -82,10 +82,10 @@ def get_system_prompts(user_id=None, is_global=None):
     conn.close()
     return prompts
 
-def delete_ystem_prompt(prompt_id):
-    conn = sqlite3.connect('users.db')
+def delete_system_prompt(prompt_id):
+    conn = sqlite3.connect('prompts.db')
     c = conn.cursor()
-    c.execute("DELETE FROM system_prompts WHERE id = ?", (prompt_id,))
+    c.execute("DELETE FROM prompts WHERE id = ?", (prompt_id,))
     conn.commit()
     conn.close()
 
@@ -99,49 +99,26 @@ async def model_list():
             else:
                 return []
                 
-async def generate(payload: dict, modelname: str, prompt: str):
-    client_timeout = ClientTimeout(total=int(timeout))
-    async with aiohttp.ClientSession(timeout=client_timeout) as session:
-        url = f"http://{ollama_base_url}:{ollama_port}/api/chat"
-
-        # Prepare the payload according to Ollama API specification
-        ollama_payload = {
-            "model": modelname,
-            "messages": payload.get("messages", []),
-            "stream": payload.get("stream", True)
-        }
-
-        try:
-            logging.info(f"Sending request to Ollama API: {url}")
-            logging.info(f"Payload: {json.dumps(ollama_payload, indent=2)}")
-
-            async with session.post(url, json=ollama_payload) as response:
+async def generate(prompt, modelname):
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"http://{ollama_base_url}:{ollama_port}/api/generate",
+                json={"model": modelname, "prompt": prompt, "stream": False}
+            ) as response:
                 if response.status != 200:
                     error_text = await response.text()
-                    logging.error(f"API Error: {response.status} - {error_text}")
-                    raise aiohttp.ClientResponseError(
-                        request_info=response.request_info,
-                        history=response.history,
-                        status=response.status,
-                        message=f"API Error: {error_text}"
-                    )
-
-                buffer = b""
-                async for chunk in response.content.iter_any():
-                    buffer += chunk
-                    while b"\n" in buffer:
-                        line, buffer = buffer.split(b"\n", 1)
-                        line = line.strip()
-                        if line:
-                            try:
-                                yield json.loads(line)
-                            except json.JSONDecodeError as e:
-                                logging.error(f"JSON Decode Error: {e}")
-                                logging.error(f"Problematic line: {line}")
-
-        except aiohttp.ClientError as e:
-            logging.error(f"Client Error during request: {e}")
-            raise
+                    logging.error(f"Ошибка Ollama API: {error_text}")
+                    raise Exception(f"Ошибка Ollama API: {error_text}")
+                
+                result = await response.json()
+                return result.get("response", "Ошибка: нет ответа от модели")
+    except aiohttp.ClientError as e:
+        logging.error(f"Ошибка подключения к Ollama API: {e}")
+        raise Exception(f"Ошибка подключения к Ollama API: {e}")
+    except Exception as e:
+        logging.error(f"Неожиданная ошибка при генерации ответа: {e}")
+        raise Exception(f"Неожиданная ошибка при генерации ответа: {e}")
 
 def load_allowed_ids_from_db():
     global allowed_ids
@@ -178,6 +155,9 @@ def remove_user_from_db(user_id):
 def perms_allowed(func):
     @wraps(func)
     async def wrapper(message: types.Message = None, query: types.CallbackQuery = None):
+        if message is None and query is None:
+            raise ValueError("Должно быть передано либо message, либо query")
+            
         user_id = message.from_user.id if message else query.from_user.id
         
         # Проверяем, является ли пользователь админом или разрешенным пользователем
