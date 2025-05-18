@@ -11,14 +11,8 @@ import base64
 import sqlite3
 bot = Bot(token=token)
 dp = Dispatcher()
-start_kb = InlineKeyboardBuilder()
 settings_kb = InlineKeyboardBuilder()
 
-start_kb.row(
-    types.InlineKeyboardButton(text="ℹ️ About", callback_data="about"),
-    types.InlineKeyboardButton(text="⚙️ Settings", callback_data="settings"),
-    types.InlineKeyboardButton(text="📝 Register", callback_data="register"),
-)
 settings_kb.row(
     types.InlineKeyboardButton(text="🔄 Switch LLM", callback_data="switchllm"),
     types.InlineKeyboardButton(text="🗑️ Delete LLM", callback_data="delete_model"),
@@ -31,13 +25,26 @@ settings_kb.row(
     types.InlineKeyboardButton(text="📋 List Users and remove User", callback_data="list_users"),
 )
 
-commands = [
+# Команды для обычных пользователей
+user_commands = [
     types.BotCommand(command="start", description="Start"),
     types.BotCommand(command="reset", description="Reset Chat"),
     types.BotCommand(command="history", description="Look through messages"),
-    types.BotCommand(command="pullmodel", description="Pull a model from Ollama"),
-    types.BotCommand(command="addglobalprompt", description="Add a global prompt"),
     types.BotCommand(command="addprivateprompt", description="Add a private prompt"),
+]
+
+# Команды для администраторов
+admin_commands = [
+    types.BotCommand(command="start", description="Start"),
+    types.BotCommand(command="reset", description="Reset Chat"),
+    types.BotCommand(command="history", description="Look through messages"),
+    types.BotCommand(command="addprivateprompt", description="Add a private prompt"),
+    types.BotCommand(command="addglobalprompt", description="Add a global prompt"),
+    types.BotCommand(command="pullmodel", description="Pull a model from Ollama"),
+    types.BotCommand(command="approve", description="Approve user registration"),
+    types.BotCommand(command="reject", description="Reject user registration"),
+    types.BotCommand(command="users", description="Show all users"),
+    types.BotCommand(command="remove", description="Remove user"),
 ]
 
 ACTIVE_CHATS = {}
@@ -71,11 +78,14 @@ def init_db():
     conn.close()
 
 def register_user(user_id, user_name):
+    global allowed_ids
     conn = sqlite3.connect('users.db')
     c = conn.cursor()
     c.execute("INSERT OR REPLACE INTO users VALUES (?, ?)", (user_id, user_name))
     conn.commit()
     conn.close()
+    if user_id not in allowed_ids:
+        allowed_ids.append(user_id)
 
 def save_chat_message(user_id, role, content):
     conn = sqlite3.connect('users.db')
@@ -85,12 +95,89 @@ def save_chat_message(user_id, role, content):
     conn.commit()
     conn.close()
 
+def check_user_exists(user_id):
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    c.execute("SELECT id FROM users WHERE id = ?", (user_id,))
+    exists = c.fetchone() is not None
+    conn.close()
+    return exists
+
+async def notify_admin_about_new_user(user_id, user_name):
+    for admin_id in admin_ids:
+        try:
+            await bot.send_message(
+                chat_id=admin_id,
+                text=f"🆕 Новый пользователь запросил доступ:\nID: {user_id}\nИмя: {user_name}\n\nИспользуйте команду /approve_{user_id} для одобрения"
+            )
+        except Exception as e:
+            logging.error(f"Failed to notify admin {admin_id}: {e}")
+
 @dp.callback_query(lambda query: query.data == "register")
 async def register_callback_handler(query: types.CallbackQuery):
     user_id = query.from_user.id
     user_name = query.from_user.full_name
+    
+    if check_user_exists(user_id):
+        await query.answer("Вы уже зарегистрированы!")
+        return
+        
     register_user(user_id, user_name)
-    await query.answer("You have been registered successfully!")
+    await notify_admin_about_new_user(user_id, user_name)
+    await query.answer("Заявка на регистрацию отправлена администраторам. Ожидайте подтверждения.")
+    await query.message.edit_text("Заявка на регистрацию отправлена администраторам. Ожидайте подтверждения.")
+
+@dp.message(lambda message: message.text.startswith("/approve_"))
+@perms_admins
+async def approve_user_handler(message: Message):
+    try:
+        user_id = int(message.text.split("_")[1])
+        if not check_user_exists(user_id):
+            await message.answer("Пользователь не найден!")
+            return
+            
+        # Устанавливаем команды для пользователя
+        await set_commands_for_user(user_id)
+            
+        # Уведомляем пользователя
+        try:
+            await bot.send_message(
+                chat_id=user_id,
+                text="✅ Ваша регистрация одобрена! Теперь вы можете использовать бота."
+            )
+        except Exception as e:
+            logging.error(f"Failed to notify user {user_id}: {e}")
+            
+        await message.answer(f"Пользователь {user_id} успешно одобрен!")
+        
+    except (ValueError, IndexError):
+        await message.answer("Неверный формат команды. Используйте: /approve_USER_ID")
+
+@dp.message(lambda message: message.text.startswith("/reject_"))
+@perms_admins
+async def reject_user_handler(message: Message):
+    try:
+        user_id = int(message.text.split("_")[1])
+        if not check_user_exists(user_id):
+            await message.answer("Пользователь не найден!")
+            return
+            
+        # Удаляем пользователя из базы
+        remove_user_from_db(user_id)
+        
+        # Уведомляем пользователя
+        try:
+            await bot.send_message(
+                chat_id=user_id,
+                text="❌ Ваша заявка на регистрацию отклонена."
+            )
+        except Exception as e:
+            logging.error(f"Failed to notify user {user_id}: {e}")
+            
+        await message.answer(f"Пользователь {user_id} отклонен и удален из базы!")
+        
+    except (ValueError, IndexError):
+        await message.answer("Неверный формат команды. Используйте: /reject_USER_ID")
 
 async def get_bot_info():
     global mention
@@ -99,13 +186,40 @@ async def get_bot_info():
         mention = f"@{get.username}"
     return mention
 
+# Функция для установки команд в зависимости от прав пользователя
+async def set_commands_for_user(user_id: int):
+    try:
+        if user_id in admin_ids:
+            await bot.set_my_commands(admin_commands, scope=types.BotCommandScopeChat(chat_id=user_id))
+            logging.info(f"Установлены команды администратора для пользователя {user_id}")
+        else:
+            await bot.set_my_commands(user_commands, scope=types.BotCommandScopeChat(chat_id=user_id))
+            logging.info(f"Установлены команды пользователя для {user_id}")
+    except Exception as e:
+        logging.error(f"Ошибка при установке команд для пользователя {user_id}: {e}")
+
 @dp.message(CommandStart())
 async def command_start_handler(message: Message) -> None:
     start_message = f"Welcome, <b>{message.from_user.full_name}</b>!"
+    
+    # Устанавливаем команды в зависимости от прав пользователя
+    await set_commands_for_user(message.from_user.id)
+    
+    # Создаем клавиатуру в зависимости от прав пользователя
+    user_kb = InlineKeyboardBuilder()
+    user_kb.row(
+        types.InlineKeyboardButton(text="ℹ️ About", callback_data="about"),
+        types.InlineKeyboardButton(text="📝 Register", callback_data="register"),
+    )
+    
+    # Добавляем кнопку Settings только для администраторов
+    if message.from_user.id in admin_ids:
+        user_kb.row(types.InlineKeyboardButton(text="⚙️ Settings", callback_data="settings"))
+    
     await message.answer(
         start_message,
         parse_mode=ParseMode.HTML,
-        reply_markup=start_kb.as_markup(),
+        reply_markup=user_kb.as_markup(),
         disable_web_page_preview=True,
     )
 
@@ -141,6 +255,7 @@ async def command_get_context_handler(message: Message) -> None:
             )
 
 @dp.message(Command("addglobalprompt"))
+@perms_admins
 async def add_global_prompt_handler(message: Message):
     prompt_text = message.text.split(maxsplit=1)[1] if len(message.text.split()) > 1 else None  # Get the prompt text from the command arguments
     if prompt_text:
@@ -172,6 +287,7 @@ async def pull_model_handler(message: Message) -> None:
         await message.answer("Please provide a model name to pull.")
 
 @dp.callback_query(lambda query: query.data == "settings")
+@perms_admins
 async def settings_callback_handler(query: types.CallbackQuery):
     await bot.send_message(
         chat_id=query.message.chat.id,
@@ -315,6 +431,32 @@ async def delete_model_confirm_handler(query: types.CallbackQuery):
     else:
         await query.answer(f"Failed to delete model: {modelname}")
 
+@dp.message(Command("users"))
+@perms_admins
+async def show_users_handler(message: Message):
+    users = get_all_users_from_db()
+    if not users:
+        await message.answer("Нет зарегистрированных пользователей.")
+        return
+        
+    user_list = "Список пользователей:\n\n"
+    for user_id, user_name in users:
+        user_list += f"ID: {user_id}\nИмя: {user_name}\n\n"
+    
+    await message.answer(user_list)
+
+@dp.message(Command("remove"))
+@perms_admins
+async def remove_user_command_handler(message: Message):
+    try:
+        user_id = int(message.text.split()[1])
+        if remove_user_from_db(user_id):
+            await message.answer(f"Пользователь {user_id} успешно удален.")
+        else:
+            await message.answer(f"Пользователь {user_id} не найден.")
+    except (ValueError, IndexError):
+        await message.answer("Неверный формат команды. Используйте: /remove USER_ID")
+
 @dp.message()
 @perms_allowed
 async def handle_message(message: types.Message):
@@ -325,47 +467,76 @@ async def handle_message(message: types.Message):
         return
 
     if await is_mentioned_in_group_or_supergroup(message):
+        # Получаем контекст сообщений
         thread = await collect_message_thread(message)
+        
+        # Форматируем промпт с учетом контекста
         prompt = format_thread_for_prompt(thread)
         
+        # Добавляем оригинальное сообщение пользователя
+        user_message = message.text or message.caption
+        if user_message and user_message.startswith(mention):
+            user_message = user_message[len(mention):].strip()
+        
+        if user_message:
+            prompt += f"\n\nЗапрос пользователя: {user_message}"
+        
+        # Отправляем запрос к боту
         await ollama_request(message, prompt)
-
-async def is_mentioned_in_group_or_supergroup(message: types.Message):
-    if message.chat.type not in ["group", "supergroup"]:
-        return False
-    
-    is_mentioned = (
-        (message.text and message.text.startswith(mention)) or
-        (message.caption and message.caption.startswith(mention))
-    )
-    
-    is_reply_to_bot = (
-        message.reply_to_message and 
-        message.reply_to_message.from_user.id == bot.id
-    )
-    
-    return is_mentioned or is_reply_to_bot
 
 async def collect_message_thread(message: types.Message, thread=None):
     if thread is None:
         thread = []
     
-    thread.insert(0, message)
+    # Добавляем сообщение в начало списка
+    thread.insert(0, {
+        'message': message,
+        'text': message.text or message.caption or "[Нет текста]",
+        'user': message.from_user.full_name,
+        'is_bot': message.from_user.id == bot.id
+    })
     
+    # Если есть ответ на сообщение, добавляем его в контекст
     if message.reply_to_message:
         await collect_message_thread(message.reply_to_message, thread)
     
     return thread
 
 def format_thread_for_prompt(thread):
-    prompt = "Conversation thread:\n\n"
-    for msg in thread:
-        sender = "User" if msg.from_user.id != bot.id else "Bot"
-        content = msg.text or msg.caption or "[No text content]"
-        prompt += f"{sender}: {content}\n\n"
+    prompt = "Контекст обсуждения:\n\n"
     
-    prompt += "History:"
+    # Добавляем все сообщения из треда
+    for msg in thread:
+        sender = "Бот" if msg['is_bot'] else msg['user']
+        prompt += f"{sender}: {msg['text']}\n\n"
+    
+    # Добавляем инструкцию для бота
+    prompt += "Пожалуйста, проанализируй контекст обсуждения и дай соответствующий комментарий."
     return prompt
+
+async def is_mentioned_in_group_or_supergroup(message: types.Message):
+    if message.chat.type not in ["group", "supergroup"]:
+        return False
+    
+    # Проверяем, упомянут ли бот в сообщении
+    is_mentioned = (
+        (message.text and message.text.startswith(mention)) or
+        (message.caption and message.caption.startswith(mention))
+    )
+    
+    # Проверяем, является ли сообщение ответом на сообщение бота
+    is_reply_to_bot = (
+        message.reply_to_message and 
+        message.reply_to_message.from_user.id == bot.id
+    )
+    
+    # Проверяем, является ли сообщение ответом на другое сообщение
+    is_reply_to_other = (
+        message.reply_to_message and 
+        message.reply_to_message.from_user.id != bot.id
+    )
+    
+    return is_mentioned or is_reply_to_bot or is_reply_to_other
 
 async def process_image(message):
     image_base64 = ""
@@ -499,9 +670,9 @@ async def ollama_request(message: types.Message, prompt: str = None):
 
 async def main():
     init_db()
+    global allowed_ids
     allowed_ids = load_allowed_ids_from_db()
     print(f"allowed_ids: {allowed_ids}")
-    await bot.set_my_commands(commands)
     await dp.start_polling(bot, skip_update=True)
 
 if __name__ == "__main__":
