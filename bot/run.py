@@ -199,28 +199,44 @@ async def set_commands_for_user(user_id: int):
         logging.error(f"Ошибка при установке команд для пользователя {user_id}: {e}")
 
 @dp.message(CommandStart())
-async def command_start_handler(message: Message) -> None:
-    start_message = f"Welcome, <b>{message.from_user.full_name}</b>!"
+async def cmd_start(message: types.Message):
+    user_id = message.from_user.id
+    user_name = message.from_user.full_name
     
-    # Устанавливаем команды в зависимости от прав пользователя
-    await set_commands_for_user(message.from_user.id)
+    # Проверяем, зарегистрирован ли пользователь
+    if not check_user_exists(user_id):
+        # Создаем клавиатуру с кнопкой регистрации
+        keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(text="Зарегистрироваться", callback_data="register")]
+        ])
+        
+        await message.answer(
+            "👋 Добро пожаловать в Ollama Telegram Bot!\n\n"
+            "🤖 Я - умный бот, который поможет вам взаимодействовать с языковыми моделями через Ollama API.\n\n"
+            "✨ Мои возможности:\n"
+            "• Умные промпты\n"
+            "• История сообщений\n"
+            "• Работа в группах\n\n"
+            "📝 Для начала работы, пожалуйста, зарегистрируйтесь:",
+            reply_markup=keyboard
+        )
+        return
     
-    # Создаем клавиатуру в зависимости от прав пользователя
-    user_kb = InlineKeyboardBuilder()
-    user_kb.row(
-        types.InlineKeyboardButton(text="ℹ️ About", callback_data="about"),
-        types.InlineKeyboardButton(text="📝 Register", callback_data="register"),
-    )
-    
-    # Добавляем кнопку Settings только для администраторов
-    if message.from_user.id in admin_ids:
-        user_kb.row(types.InlineKeyboardButton(text="⚙️ Settings", callback_data="settings"))
+    # Если пользователь уже зарегистрирован, показываем основное меню
+    keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="ℹ️ О боте", callback_data="about")],
+        [types.InlineKeyboardButton(text="🔄 Сбросить историю", callback_data="reset_history")]
+    ])
     
     await message.answer(
-        start_message,
-        parse_mode=ParseMode.HTML,
-        reply_markup=user_kb.as_markup(),
-        disable_web_page_preview=True,
+        f"👋 Привет, {user_name}!\n\n"
+        "🤖 Я - ваш умный ассистент на базе Ollama API.\n\n"
+        "✨ Что я умею:\n"
+        "• Общаться на разные темы\n"
+        "• Помогать с задачами\n"
+        "• Работать в группах\n\n"
+        "💡 Просто напишите мне сообщение!",
+        reply_markup=keyboard
     )
 
 @dp.message(Command("reset"))
@@ -330,15 +346,48 @@ async def model_callback_handler(query: types.CallbackQuery):
 
 @dp.callback_query(lambda query: query.data == "about")
 @perms_admins
-async def about_callback_handler(query: types.CallbackQuery):
-    dotenv_model = os.getenv("INITMODEL")
-    global modelname
-    await bot.send_message(
-        chat_id=query.message.chat.id,
-        text=f"<b>Your LLMs</b>\nCurrently using: <code>{modelname}</code>\nDefault in .env: <code>{dotenv_model}</code>\nThis project is under <a href='https://github.com/ruecat/ollama-telegram/blob/main/LICENSE'>MIT License.</a>\n<a href='https://github.com/ruecat/ollama-telegram'>Source Code</a>",
-        parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True,
+async def about_callback(query: types.CallbackQuery):
+    user_id = query.from_user.id
+    
+    # Проверяем, является ли пользователь администратором
+    is_admin = user_id in admin_ids
+    
+    about_text = (
+        "🤖 <b>О боте</b>\n\n"
+        "Я - умный бот на базе Ollama API, который помогает взаимодействовать с языковыми моделями.\n\n"
+        "✨ <b>Основные возможности:</b>\n"
+        "• Умные промпты\n"
+        "• История сообщений\n"
+        "• Работа в группах\n\n"
+        "📝 <b>Как использовать:</b>\n"
+        "• В личных сообщениях: просто пишите мне\n"
+        "• В группах: упомяните меня в сообщении\n"
+        "• Для сброса истории: используйте /reset\n"
+        "• Для просмотра истории: используйте /history\n\n"
     )
+    
+    if is_admin:
+        about_text += (
+            "👑 <b>Административные команды:</b>\n"
+            "• /addglobalprompt - добавить глобальный промпт\n"
+            "• /pullmodel - загрузить модель\n"
+            "• /approve - одобрить пользователя\n"
+            "• /reject - отклонить пользователя\n"
+            "• /users - список пользователей\n"
+            "• /remove - удалить пользователя\n\n"
+        )
+    
+    about_text += (
+        "🔧 <b>Техническая информация:</b>\n"
+        "• Версия: 1.1.0\n"
+        "• База: Ollama API\n"
+        "• Поддержка: Python 3.8+\n\n"
+        "📚 <b>Документация:</b>\n"
+        "• GitHub: https://github.com/yourusername/ollama-telegram\n"
+        "• Документация: https://github.com/yourusername/ollama-telegram/wiki"
+    )
+    
+    await query.message.edit_text(about_text, parse_mode="HTML")
 
 @dp.callback_query(lambda query: query.data == "list_users")
 @perms_admins
