@@ -144,12 +144,14 @@ async def generate(payload: dict, modelname: str, prompt: str):
             raise
 
 def load_allowed_ids_from_db():
+    global allowed_ids
     conn = sqlite3.connect('users.db')
     c = conn.cursor()
     c.execute("SELECT id FROM users")
     user_ids = [row[0] for row in c.fetchall()]
     print(f"users_ids: {user_ids}")
     conn.close()
+    allowed_ids = user_ids
     return user_ids
 
 
@@ -162,6 +164,7 @@ def get_all_users_from_db():
     return users
 
 def remove_user_from_db(user_id):
+    global allowed_ids
     conn = sqlite3.connect('users.db')
     c = conn.cursor()
     c.execute("DELETE FROM users WHERE id = ?", (user_id,))
@@ -176,22 +179,26 @@ def perms_allowed(func):
     @wraps(func)
     async def wrapper(message: types.Message = None, query: types.CallbackQuery = None):
         user_id = message.from_user.id if message else query.from_user.id
+        
+        # Проверяем, является ли пользователь админом или разрешенным пользователем
         if user_id in admin_ids or user_id in allowed_ids:
             if message:
                 return await func(message)
             elif query:
                 return await func(query=query)
         else:
+            # Для групповых чатов
+            if message and message.chat.type in ["supergroup", "group"]:
+                if allow_all_users_in_groups:
+                    return await func(message)
+                return
+            
+            # Для личных сообщений
             if message:
-                if message and message.chat.type in ["supergroup", "group"]:
-                    if allow_all_users_in_groups:
-                        return await func(message)
-                    return
-                await message.answer("Access Denied")
+                await message.answer("Доступ запрещен. Пожалуйста, зарегистрируйтесь, нажав кнопку 'Register'.")
             elif query:
-                if message and message.chat.type in ["supergroup", "group"]:
-                    return
-                await query.answer("Access Denied")
+                await query.answer("Доступ запрещен. Пожалуйста, зарегистрируйтесь, нажав кнопку 'Register'.")
+                logging.info(f"Пользователь {user_id} пытался получить доступ без регистрации")
 
     return wrapper
 
