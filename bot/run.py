@@ -451,10 +451,11 @@ async def delete_prompt_callback_handler(query: types.CallbackQuery):
     )
 
 @dp.callback_query(lambda query: query.data.startswith("delete_prompt_"))
-async def delete_prompt_confirm_handler(query: types.CallbackQuery):
-    prompt_id = int(query.data.split("delete_prompt_")[1])
-    delete_ystem_prompt(prompt_id)
-    await query.answer(f"Deleted prompt ID: {prompt_id}")
+async def delete_prompt_callback(query: types.CallbackQuery):
+    prompt_id = int(query.data.split("_")[-1])
+    delete_system_prompt(prompt_id)
+    await query.answer("Промпт удален")
+    await query.message.edit_text("Промпт успешно удален")
 
 @dp.callback_query(lambda query: query.data == "delete_model")
 async def delete_model_callback_handler(query: types.CallbackQuery):
